@@ -28,11 +28,6 @@ A commit that only reflows or reformats, and changes no meaning, must be added
 to `.git-blame-ignore-revs` in a follow-up commit. Otherwise it MASKS the real
 reason in `git blame`, which is the exact problem this tool exists to solve.
 
-## Signed commits
-
-Commits to `main` must be signed. GitHub documents how to sign with an SSH key,
-which needs no GPG setup.
-
 ## Scope
 
 This tool stays small. Its purpose is to answer one question cheaply. A feature
