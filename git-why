@@ -205,7 +205,7 @@ else
 	DETAIL=$COMMITS
 fi
 
-printf '%s\n' "$RANKED" | head -n "$DETAIL" | while read -r count order sha; do
+printf '%s\n' "$RANKED" | head -n "$DETAIL" | while read -r count _ sha; do
 	show "$sha" "$count"
 done
 
@@ -214,7 +214,7 @@ REST=$((COMMITS - DETAIL))
 if [ "$REST" -gt 0 ]; then
 	printf '\nAlso in this range: %s\n' "$(plural "$REST" commit)"
 	printf '%s\n' "$RANKED" | tail -n "+$((DETAIL + 1))" | head -n "$MAX_TAIL" |
-		while read -r count order sha; do
+		while read -r count _ sha; do
 			printf '  %s  %s  %s\n' "$(printf '%s' "$sha" | cut -c1-8)" \
 				"$(plural "$count" line)" "$(git log -1 --format=%s "$sha")"
 		done
