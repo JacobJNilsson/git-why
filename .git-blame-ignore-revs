@@ -1,0 +1,12 @@
+# Commits that blame must look through.
+#
+# Add a commit here when it changes the shape of the text and none of the
+# meaning. A reflow, a re-indent, a formatter run and a quote style change
+# all qualify. Do not add a commit that changes behaviour or wording.
+#
+# git reads this file when you point config at it, once per clone:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub reads it from the repository root with no config.
+# git-why reads it from the root too, so both paths give the same answer.
+#
+# One full 40 character sha per line. A comment starts with #.
