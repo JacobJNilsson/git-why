@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Linux and macOS run different shells and different git builds. /bin/sh is
+    # dash on Ubuntu and bash on macOS, and this tool claims POSIX sh, so the
+    # Ubuntu leg is the one that proves the claim.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        # The tests build their own fixture repository and read no history of
+        # this one, so a shallow clone is enough.
+
+      - name: Run the test suite
+        run: ./test.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck reads the shebang, so it checks both files as POSIX sh.
+      - name: Lint the shell
+        run: shellcheck git-why test.sh
