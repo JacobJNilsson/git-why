@@ -1,0 +1,226 @@
+#!/bin/sh
+# git-why answers "why is this line the way it is" for a line range.
+# It ranks the commits that explain the lines, then prints each commit body.
+# The body holds the reason. The tool prints no diff, no author and no date.
+
+set -eu
+
+MAX_COMMITS=3
+MAX_BODY_LINES=20
+MAX_TAIL=10
+IGNORE_FILE=
+
+plural() {
+	if [ "$1" -eq 1 ]; then
+		printf '%s %s' "$1" "$2"
+	else
+		printf '%s %ss' "$1" "$2"
+	fi
+}
+
+die() {
+	printf 'git-why: %s\n' "$1" >&2
+	exit "${2:-2}"
+}
+
+usage() {
+	cat <<'EOF'
+Usage: git-why [options] <file> [<line>|<start>-<end>]
+
+git-why shows the commits that explain a line range. It ranks the commits by
+the number of lines each one explains. It prints the commit message body,
+because the body holds the reason.
+
+git-why ignores whitespace changes and it follows moved or copied code. A
+reformat or a code move does not become the answer.
+
+Options:
+  -n N                   Print the body of the first N commits. Default 3.
+  -b N                   Print a maximum of N body lines per commit. Default 20.
+  --ignore-revs-file F   Ignore the commits that file F lists.
+  -h, --help             Print this help.
+
+Examples:
+  git-why internal/cli/cli.go 240-270   the reasons behind lines 240 to 270
+  git-why internal/cli/cli.go 421       the reason behind one line
+  git-why internal/cli/cli.go           rank the commits, print no bodies
+
+Exit codes:
+  0  success
+  1  bad usage
+  2  git failed, or the file or the range is wrong
+EOF
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	-n)
+		[ $# -ge 2 ] || die "-n needs a number" 1
+		MAX_COMMITS=$2
+		shift 2
+		;;
+	-b)
+		[ $# -ge 2 ] || die "-b needs a number" 1
+		MAX_BODY_LINES=$2
+		shift 2
+		;;
+	--ignore-revs-file)
+		[ $# -ge 2 ] || die "--ignore-revs-file needs a path" 1
+		IGNORE_FILE=$2
+		shift 2
+		;;
+	--)
+		shift
+		break
+		;;
+	-*)
+		die "unknown option: $1" 1
+		;;
+	*)
+		break
+		;;
+	esac
+done
+
+case $MAX_COMMITS in '' | *[!0-9]*) die "-n needs a whole number" 1 ;; esac
+case $MAX_BODY_LINES in '' | *[!0-9]*) die "-b needs a whole number" 1 ;; esac
+[ "$MAX_COMMITS" -ge 1 ] || die "-n needs a number of 1 or more" 1
+[ "$MAX_BODY_LINES" -ge 1 ] || die "-b needs a number of 1 or more" 1
+
+if [ $# -lt 1 ]; then
+	usage >&2
+	exit 1
+fi
+[ $# -le 2 ] || die "too many arguments. Give one file and one range" 1
+
+FILE=$1
+RANGE=${2:-}
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) ||
+	die "not a git repository: $(pwd)"
+git ls-files --error-unmatch -- "$FILE" >/dev/null 2>&1 ||
+	die "git does not track this file: $FILE"
+[ -f "$FILE" ] || die "the file is not in the working tree: $FILE"
+
+TOTAL=$(awk 'END { print NR }' "$FILE")
+
+START=
+END=
+if [ -n "$RANGE" ]; then
+	case $RANGE in
+	*[!0-9-]* | -* | *- | *-*-*)
+		die "bad range: $RANGE. Use 42 or 42-99" 1
+		;;
+	*-*)
+		START=${RANGE%-*}
+		END=${RANGE#*-}
+		;;
+	*)
+		START=$RANGE
+		END=$RANGE
+		;;
+	esac
+	[ "$START" -ge 1 ] || die "the range must start at line 1 or later" 1
+	[ "$START" -le "$END" ] ||
+		die "the range starts after it ends: $START-$END" 1
+	[ "$END" -le "$TOTAL" ] ||
+		die "line $END is past the end of $FILE, which has $TOTAL lines"
+fi
+
+# Follow the .git-blame-ignore-revs convention. Git reads that file when
+# blame.ignoreRevsFile names it. GitHub reads the file from the repository
+# root with no config at all. Read the root file too, so both paths agree.
+set --
+if [ -n "$IGNORE_FILE" ]; then
+	[ -f "$IGNORE_FILE" ] || die "no such ignore-revs file: $IGNORE_FILE"
+	set -- --ignore-revs-file "$IGNORE_FILE"
+elif [ -z "$(git config blame.ignoreRevsFile || true)" ] &&
+	[ -f "$ROOT/.git-blame-ignore-revs" ]; then
+	set -- --ignore-revs-file "$ROOT/.git-blame-ignore-revs"
+fi
+[ -z "$START" ] || set -- "$@" -L "$START,$END"
+
+# -w hides whitespace edits. -C -C -C follows moved and copied lines.
+BLAME=$(git blame -w -C -C -C --porcelain "$@" -- "$FILE") ||
+	die "git blame failed on $FILE"
+
+# Count the lines per commit across the whole range, then sort by that count.
+# An earlier prototype used "uniq -c", which joins neighbour lines only, so a
+# commit that held two separate blocks appeared twice. This awk keys on the
+# sha, so it counts each commit once. It breaks a tie by first appearance.
+RANKED=$(printf '%s\n' "$BLAME" | awk '
+	/^[0-9a-f]/ && length($1) == 40 {
+		if (!($1 in first)) { first[$1] = ++order }
+		count[$1]++
+	}
+	END { for (sha in count) printf "%d %d %s\n", count[sha], first[sha], sha }
+' | sort -k1,1nr -k2,2n)
+
+[ -n "$RANKED" ] || die "git blame explained no lines of $FILE"
+
+COMMITS=$(printf '%s\n' "$RANKED" | wc -l | tr -d ' ')
+if [ -n "$START" ]; then
+	WHERE="$FILE:$RANGE"
+	LINES=$((END - START + 1))
+else
+	WHERE=$FILE
+	LINES=$TOTAL
+fi
+printf '%s  %s, %s\n' "$WHERE" "$(plural "$LINES" line)" \
+	"$(plural "$COMMITS" commit)"
+
+# Print one entry per commit. Add the body only when the caller gave a range.
+# A whole file query asks for a map, not for a reason, so a body only costs.
+show() {
+	short=$(printf '%s' "$1" | cut -c1-8)
+	# A body follows in range mode, so a blank line separates the entries.
+	[ -z "$START" ] || printf '\n'
+	if [ "$1" = 0000000000000000000000000000000000000000 ]; then
+		printf '%s  %s  (not committed yet)\n' "$short" "$(plural "$2" line)"
+		return 0
+	fi
+	printf '%s  %s  %s\n' "$short" "$(plural "$2" line)" \
+		"$(git log -1 --format=%s "$1")"
+	[ -n "$START" ] || return 0
+	body=$(git log -1 --format=%b "$1")
+	[ -n "$body" ] || return 0
+	# Cut a long body, and say so. A silent cut reads as a complete answer.
+	printf '%s\n' "$body" | awk -v max="$MAX_BODY_LINES" -v s="$short" '
+		NR <= max { print ($0 == "" ? "" : "  " $0); next }
+		{
+			print "  ... body cut at " max " lines."
+			print "  Read all of it with: git log -1 " s
+			exit
+		}
+	'
+}
+
+if [ -n "$START" ]; then
+	DETAIL=$MAX_COMMITS
+else
+	DETAIL=$COMMITS
+fi
+
+printf '%s\n' "$RANKED" | head -n "$DETAIL" | while read -r count order sha; do
+	show "$sha" "$count"
+done
+
+# Name the commits that did not fit. Never drop them without a word.
+REST=$((COMMITS - DETAIL))
+if [ "$REST" -gt 0 ]; then
+	printf '\nAlso in this range: %s\n' "$(plural "$REST" commit)"
+	printf '%s\n' "$RANKED" | tail -n "+$((DETAIL + 1))" | head -n "$MAX_TAIL" |
+		while read -r count order sha; do
+			printf '  %s  %s  %s\n' "$(printf '%s' "$sha" | cut -c1-8)" \
+				"$(plural "$count" line)" "$(git log -1 --format=%s "$sha")"
+		done
+	if [ "$REST" -gt "$MAX_TAIL" ]; then
+		printf '  ... and %s more. See them all with: git-why -n %s %s %s\n' \
+			"$((REST - MAX_TAIL))" "$COMMITS" "$FILE" "$RANGE"
+	fi
+	printf '  Read any body with: git log -1 <sha>\n'
+fi
